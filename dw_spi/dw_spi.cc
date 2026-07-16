@@ -4,7 +4,6 @@
 #include <cstdio>
 #include <fstream>
 #include <limits>
-#include <optional>
 #include <stdexcept>
 #include <string>
 #include <string_view>
@@ -39,7 +38,8 @@ constexpr uint8_t status_rfne = 1 << 3;
 struct dw_spi_config_t {
   reg_t mmio_base;
   reg_t mmio_size;
-  std::optional<std::string> image_path;
+  std::string image_path;
+  spi_nor_t::jedec_id_t jedec_id;
 };
 
 reg_t parse_reg(const std::string& value, const char* name)
@@ -70,16 +70,30 @@ uint32_t read_little_endian_u32(const uint8_t* bytes)
          uint32_t(bytes[3]) << 24;
 }
 
+spi_nor_t::jedec_id_t parse_jedec_id(const std::string& value)
+{
+  const reg_t id = parse_reg(value, "jedec");
+  if (id > 0xffffff)
+    throw std::out_of_range("jedec must fit in 24 bits");
+
+  return {
+    static_cast<uint8_t>(id >> 16),
+    static_cast<uint8_t>(id >> 8),
+    static_cast<uint8_t>(id),
+  };
+}
+
 dw_spi_config_t parse_config(const std::vector<std::string>& args)
 {
-  if (args.size() < 2 || args.size() > 3)
+  if (args.size() < 2)
     throw std::invalid_argument(
-      "expected <base>,<mmio-size>[,<image-path>]");
+      "expected <base>,<mmio-size>[,img=<path>][,jedec=<id>]");
 
   dw_spi_config_t config = {
     .mmio_base = parse_reg(args[0], "base"),
     .mmio_size = parse_reg(args[1], "mmio-size"),
-    .image_path = std::nullopt,
+    .image_path = {},
+    .jedec_id = spi_nor_t::default_jedec_id,
   };
 
   if (config.mmio_base == 0)
@@ -90,26 +104,51 @@ dw_spi_config_t parse_config(const std::vector<std::string>& args)
       std::numeric_limits<reg_t>::max() - (config.mmio_size - 1))
     throw std::out_of_range("device address range overflows reg_t");
 
-  if (args.size() == 3) {
-    if (args[2].empty())
-      throw std::invalid_argument("image-path must be nonempty");
-    config.image_path = args[2];
+  bool image_seen = false;
+  bool jedec_seen = false;
+  for (size_t i = 2; i < args.size(); ++i) {
+    const size_t separator = args[i].find('=');
+    if (separator == std::string::npos)
+      throw std::invalid_argument("optional arguments must use key=value");
+
+    const std::string_view key(args[i].data(), separator);
+    const std::string value = args[i].substr(separator + 1);
+    if (key == "img") {
+      if (image_seen)
+        throw std::invalid_argument("img specified more than once");
+      if (value.empty())
+        throw std::invalid_argument("img path must be nonempty");
+      config.image_path = value;
+      image_seen = true;
+      continue;
+    }
+
+    if (key == "jedec") {
+      if (jedec_seen)
+        throw std::invalid_argument("jedec specified more than once");
+      if (value.empty())
+        throw std::invalid_argument("jedec must be nonempty");
+      config.jedec_id = parse_jedec_id(value);
+      jedec_seen = true;
+      continue;
+    }
+
+    throw std::invalid_argument("unknown option '" + std::string(key) + "'");
   }
 
   return config;
 }
 
 std::vector<uint8_t>
-load_initial_image(const std::optional<std::string>& image_path,
-                   size_t image_size)
+load_initial_image(const std::string& image_path, size_t image_size)
 {
   std::vector<uint8_t> image(image_size, 0xff);
-  if (!image_path)
+  if (image_path.empty())
     return image;
 
-  std::ifstream input(*image_path, std::ios::binary | std::ios::ate);
+  std::ifstream input(image_path, std::ios::binary | std::ios::ate);
   if (!input)
-    throw std::runtime_error("cannot open initial image '" + *image_path + "'");
+    throw std::runtime_error("cannot open initial image '" + image_path + "'");
 
   const std::streamoff file_size = input.tellg();
   if (file_size < 0)
@@ -138,7 +177,8 @@ dw_spi_t* dw_spi_parse_from_fdt(const void*, const sim_t*, reg_t* base,
     auto initial_image =
       load_initial_image(config.image_path, spi_nor_t::flash_size);
     *base = config.mmio_base;
-    return new dw_spi_t(config.mmio_size, std::move(initial_image));
+    return new dw_spi_t(config.mmio_size, std::move(initial_image),
+                        config.jedec_id);
   } catch (const std::exception& error) {
     std::fprintf(stderr, "dw_spi: invalid device configuration: %s\n",
                  error.what());
@@ -154,9 +194,10 @@ std::string dw_spi_generate_dts(const sim_t*,
 
 } // namespace
 
-dw_spi_t::dw_spi_t(reg_t device_size, std::vector<uint8_t> initial_image)
-  : device_size(device_size), flash(std::move(initial_image)), ctrlr0(0), ser(0),
-    baudr(0), imr(0), idle_poll_seen(false), enabled(false),
+dw_spi_t::dw_spi_t(reg_t device_size, std::vector<uint8_t> initial_image,
+                   spi_nor_t::jedec_id_t jedec_id)
+  : device_size(device_size), flash(std::move(initial_image), jedec_id),
+    ctrlr0(0), ser(0), baudr(0), imr(0), idle_poll_seen(false), enabled(false),
     transaction_active(false)
 {
 }

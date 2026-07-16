@@ -11,11 +11,14 @@
 // https://www.winbond.com/resource-files/w25q128jv%20revf%2003272018%20plus.pdf
 class spi_nor_t {
  public:
+  using jedec_id_t = std::array<uint8_t, 3>;
+
   static constexpr size_t flash_size = 16 * 1024 * 1024;
   static constexpr size_t page_size = 256;
   static constexpr size_t sector_size = 64 * 1024;
+  static constexpr jedec_id_t default_jedec_id = {0xef, 0x40, 0x18};
 
-  explicit spi_nor_t(std::vector<uint8_t> storage);
+  spi_nor_t(std::vector<uint8_t> storage, jedec_id_t jedec_id);
 
   void cs_assert();
   uint8_t transfer(uint8_t tx);
@@ -30,6 +33,7 @@ class spi_nor_t {
     none,
     unknown,
     read_id,
+    read_sfdp,
     read_status,
     write_enable,
     read,
@@ -47,6 +51,7 @@ class spi_nor_t {
   void reset_transaction();
 
   std::vector<uint8_t> storage;
+  jedec_id_t jedec_id;
   std::array<uint8_t, page_size> program_buffer;
   command_t command;
   uint32_t address;

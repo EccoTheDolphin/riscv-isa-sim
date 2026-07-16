@@ -10,7 +10,8 @@
 
 class dw_spi_t : public abstract_device_t {
  public:
-  dw_spi_t(reg_t device_size, std::vector<uint8_t> initial_image);
+  dw_spi_t(reg_t device_size, std::vector<uint8_t> initial_image,
+           spi_nor_t::jedec_id_t jedec_id);
 
   bool load(reg_t addr, size_t len, uint8_t* bytes) override;
   bool store(reg_t addr, size_t len, const uint8_t* bytes) override;
